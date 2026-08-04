@@ -29,10 +29,10 @@ can still perform every CAD operation and receive structured model/mesh data.
 Node.js 20 or later is the only runtime requirement. The CAD engine and all
 JavaScript dependencies install with the package.
 
-Run directly from GitHub:
+Run the published npm package:
 
 ```bash
-npx -y github:flujo-app/mcp-cad-studio --stdio
+npx -y mcp-cad-studio --stdio
 ```
 
 Or clone and build:
@@ -52,7 +52,7 @@ npm start -- --stdio
   "mcpServers": {
     "cad-studio": {
       "command": "npx",
-      "args": ["-y", "github:flujo-app/mcp-cad-studio", "--stdio"]
+      "args": ["-y", "mcp-cad-studio", "--stdio"]
     }
   }
 }
