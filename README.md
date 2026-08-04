@@ -182,6 +182,19 @@ npm run build     # bundle the MCP App and server
 npm pack          # verify the single-package artifact
 ```
 
+To publish the current version to npm:
+
+```bash
+npm run release
+```
+
+The release command signs in through npm when necessary, runs the complete
+check suite, publishes the package publicly, and confirms that npm serves the
+version. It is safe to rerun: if that exact version is already published, it
+verifies the project and skips the duplicate publish.
+
+Run `npm run release:check` to validate the release helper without publishing.
+
 ## Security notes
 
 - Tool schemas cap shape depth, node count, mesh size, and imported file size.

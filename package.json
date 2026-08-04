@@ -28,6 +28,8 @@
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "check": "npm run typecheck && npm test && npm run build",
+    "release": "node scripts/release-npm.mjs",
+    "release:check": "node scripts/release-npm.mjs --check",
     "prepack": "npm run check"
   },
   "dependencies": {
@@ -67,5 +69,8 @@
   "bugs": {
     "url": "https://github.com/flujo-app/mcp-cad-studio/issues"
   },
-  "homepage": "https://github.com/flujo-app/mcp-cad-studio#readme"
+  "homepage": "https://github.com/flujo-app/mcp-cad-studio#readme",
+  "publishConfig": {
+    "access": "public"
+  }
 }
