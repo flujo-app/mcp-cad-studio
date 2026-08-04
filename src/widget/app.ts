@@ -422,10 +422,14 @@ byId<HTMLButtonElement>("delete-model").addEventListener("click", async () => {
   if (!activeModel || !window.confirm(`Delete “${activeModel.name}”?`)) return;
   const deletedName = activeModel.name;
   try {
-    const result = await callTool("delete_model", { modelId: activeModel.id });
+    const result = await callTool("delete_model", {
+      modelId: activeModel.id,
+      expectedRevision: activeModel.revision,
+    });
     applyPayload(resultPayload(result));
-    if (models[0]) await loadModel(models[0].id, true);
-    else { activeModel = null; showMesh(null); renderInspector(true); }
+    if (activeModel) fitView();
+    else if (models[0]) await loadModel(models[0].id, true);
+    else { showMesh(null); renderInspector(true); }
     toast(`${deletedName} deleted`);
   } catch { /* reported */ }
 });

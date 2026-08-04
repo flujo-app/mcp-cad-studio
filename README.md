@@ -11,7 +11,10 @@ models in a live 3D studio rendered inside any compatible host.
 - Creates boxes, spheres, cylinders, cones, polygon extrusions, imported meshes,
   transforms, and nested union/difference/intersection trees.
 - Generates editable brackets, pipes, gears, enclosures, and bolts.
-- Loads and updates persistent model documents with optimistic revision checks.
+- Loads, patches, regenerates, and deletes persistent model documents with
+  optimistic revision checks.
+- Preflights extrusion outlines and raw meshes with actionable topology
+  diagnostics before they reach the CAD kernel.
 - Imports ASCII/binary STL and OBJ; exports ASCII STL and OBJ.
 - Keeps an open app synchronized with model-initiated MCP tool calls.
 - Runs over stdio or Streamable HTTP, with direct HTTPS support.
@@ -89,8 +92,9 @@ The MCP endpoint is `/mcp`; a read-only health endpoint is available at
 | `list_models` | List saved models and revisions |
 | `load_model` | Load the parametric document and its render mesh |
 | `create_model` | Create a model from a declarative shape tree |
-| `generate_model` | Generate an editable bracket, pipe, gear, enclosure, or bolt |
-| `update_model` | Replace a model's definition, name, or color |
+| `generate_model` | Create a template model, or regenerate one in place by `modelId` |
+| `update_model` | Patch or replace a model's definition, name, or color in place |
+| `validate_shape` | Preflight a shape without saving it |
 | `transform_model` | Apply an incremental translation, rotation, or scale |
 | `boolean_models` | Union, subtract, or intersect saved models into a new model |
 | `duplicate_model` | Make an editable copy |
@@ -99,7 +103,35 @@ The MCP endpoint is `/mcp`; a read-only health endpoint is available at
 | `export_model` | Export ASCII STL/OBJ data |
 
 All mutating results include `models`, `activeModel`, and `mesh` in
-`structuredContent`, so the UI and model see the same canonical state.
+`structuredContent`, so the UI and model see the same canonical state. Model
+creation is reserved for genuinely separate models. For revisions, first call
+`load_model`, then pass its `modelId` and `revision` back as
+`expectedRevision` to `update_model`, `generate_model`, or `delete_model`.
+
+### Updating without creating copies
+
+`update_model` preserves the model ID and supports either a complete replacement
+`shape` or small RFC 6901 JSON-Pointer-style patches. This changes the X size of
+a saved box without resending its whole definition:
+
+```json
+{
+  "modelId": "5e44fd24-b7df-450a-a7bb-31c95496832f",
+  "expectedRevision": 3,
+  "patches": [
+    { "op": "replace", "path": "/shape/size/0", "value": 80 }
+  ]
+}
+```
+
+Patches can target `/shape`, `/name`, or `/color` and are applied in order.
+`add`, `replace`, and `remove` are supported. The completed definition is
+schema-checked and geometry-checked before the saved model is changed.
+
+For template-level edits, such as changing a gear's tooth count, call
+`generate_model` with the existing `modelId` and `expectedRevision`. The
+template is regenerated into the same document instead of creating another
+model.
 
 ## Parametric model format
 
@@ -141,6 +173,22 @@ Every node can include a transform:
 Rotations use degrees. Dimensions are unit-agnostic in the kernel; the studio
 labels them as millimeters.
 
+Shape objects are strict: misspelled or unsupported fields produce an error
+instead of being silently ignored. `validate_shape` checks a draft without
+saving and reports JSON paths, error codes, and suggested repairs. Checks
+include:
+
+- repeated, zero-length, zero-area, and self-intersecting extrusion outlines;
+- incomplete or out-of-range mesh arrays and degenerate triangles;
+- open boundaries, edges shared by too many faces, inconsistent winding, and
+  disconnected surface fans at a vertex;
+- shape-tree and twisted-extrusion complexity limits;
+- final verification by the Manifold CAD kernel.
+
+If the kernel still rejects a shape, its status is translated into guidance for
+non-finite vertices, non-manifold geometry, invalid construction, oversized
+results, and the other kernel status classes.
+
 ## Architecture
 
 ```mermaid
@@ -168,7 +216,7 @@ npm install
 npm run check
 ```
 
-`npm run check` performs strict TypeScript checking, 11 kernel/store/protocol/
+`npm run check` performs strict TypeScript checking, 16 kernel/store/protocol/
 transport tests, and a production build. The test suite uses the real
 WebAssembly geometry engine and both in-memory and Streamable HTTP MCP clients.
 
@@ -199,7 +247,10 @@ Run `npm run release:check` to validate the release helper without publishing.
 
 - Tool schemas cap shape depth, node count, mesh size, and imported file size.
 - Mutation tools accurately declare read-only/destructive/open-world hints.
-- `expectedRevision` prevents accidental overwrites during concurrent editing.
+- `expectedRevision` prevents accidental overwrites and stale deletion during
+  concurrent editing.
+- Patch paths are restricted to editable model fields and reject prototype
+  traversal.
 - The app resource declares an empty external-resource/connect CSP.
 - A generated self-signed certificate is intended for local development only.
 - Authentication is deployment-specific. Put remote multi-user instances behind

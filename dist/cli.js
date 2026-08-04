@@ -26,6 +26,506 @@ import { z as z2 } from "zod";
 
 // src/geometry.ts
 import createManifoldModule from "manifold-3d";
+
+// src/schema.ts
+import { z } from "zod";
+var finiteNumber = z.number().finite();
+var positive = finiteNumber.positive().max(1e5);
+var vec2 = z.tuple([finiteNumber, finiteNumber]);
+var vec3 = z.tuple([finiteNumber, finiteNumber, finiteNumber]);
+var transform = z.object({
+  translation: vec3.describe("XYZ translation, in the studio's millimeter units").optional(),
+  rotation: vec3.describe("XYZ Euler rotation in degrees").optional(),
+  scale: z.tuple([
+    finiteNumber.refine((value2) => value2 !== 0, "Scale cannot be zero"),
+    finiteNumber.refine((value2) => value2 !== 0, "Scale cannot be zero"),
+    finiteNumber.refine((value2) => value2 !== 0, "Scale cannot be zero")
+  ]).describe("Non-zero XYZ scale factors").optional()
+}).strict().describe("Optional transform applied after constructing this node");
+var base = { transform: transform.optional() };
+var shapeSchema = z.lazy(
+  () => z.discriminatedUnion("kind", [
+    z.object({
+      ...base,
+      kind: z.literal("box"),
+      size: z.tuple([positive, positive, positive]).describe("Positive XYZ dimensions"),
+      center: z.boolean().describe("Center the box on the origin instead of using its minimum corner").optional()
+    }).strict().describe("Rectangular solid"),
+    z.object({
+      ...base,
+      kind: z.literal("sphere"),
+      radius: positive.describe("Positive radius"),
+      segments: z.number().int().min(8).max(256).describe("Surface resolution; normally 32\u201364").optional()
+    }).strict().describe("Spherical solid centered on the origin"),
+    z.object({
+      ...base,
+      kind: z.literal("cylinder"),
+      height: positive.describe("Positive Z-axis height"),
+      radius: positive.describe("Positive radius"),
+      segments: z.number().int().min(3).max(256).describe("Radial resolution; normally 32\u201364").optional(),
+      center: z.boolean().describe("Center the height on Z=0 instead of starting at Z=0").optional()
+    }).strict().describe("Cylindrical solid aligned to the Z axis"),
+    z.object({
+      ...base,
+      kind: z.literal("cone"),
+      height: positive.describe("Positive Z-axis height"),
+      radiusBottom: positive.describe("Positive bottom radius"),
+      radiusTop: finiteNumber.min(0).max(1e5).describe("Top radius; use 0 for a pointed cone"),
+      segments: z.number().int().min(3).max(256).describe("Radial resolution; normally 32\u201364").optional(),
+      center: z.boolean().describe("Center the height on Z=0 instead of starting at Z=0").optional()
+    }).strict().describe("Cone or conical frustum aligned to the Z axis"),
+    z.object({
+      ...base,
+      kind: z.literal("extrude"),
+      points: z.array(vec2).min(3).max(2048).describe(
+        "Ordered XY boundary of one simple polygon. Do not repeat the first point at the end; the boundary closes automatically."
+      ),
+      height: positive.describe("Positive extrusion height along Z"),
+      twist: finiteNumber.min(-1e4).max(1e4).describe("Optional total twist in degrees").optional(),
+      scaleTop: vec2.describe("Optional XY scale factors at the top of the extrusion").optional(),
+      center: z.boolean().describe("Center the height on Z=0 instead of starting at Z=0").optional()
+    }).strict().describe("Solid extrusion of a simple, non-self-intersecting XY polygon"),
+    z.object({
+      ...base,
+      kind: z.literal("mesh"),
+      vertices: z.array(finiteNumber).min(9).max(9e5).describe("Flat XYZ coordinate triples"),
+      triangles: z.array(z.number().int().nonnegative()).min(3).max(9e5).describe(
+        "Flat triples of zero-based vertex indices, wound counter-clockwise from outside. The mesh must be closed and manifold."
+      )
+    }).strict().describe("Closed, consistently wound, manifold triangle mesh"),
+    z.object({
+      ...base,
+      kind: z.enum(["union", "difference", "intersection"]),
+      children: z.array(shapeSchema).min(2).max(64).describe(
+        "Operand shapes. For difference, the first child is the base and all later children are subtracted."
+      )
+    }).strict().describe("Boolean operation over two or more closed solids")
+  ]).describe(
+    "Complete declarative solid definition. Every object is strict; use only documented fields."
+  )
+);
+var colorSchema = z.string().regex(/^#[0-9a-fA-F]{6}$/, "Use a six-digit hex color such as #4f8cff");
+var modelNameSchema = z.string().trim().min(1).max(120);
+
+// src/validation.ts
+var MAX_SHAPE_DEPTH = 24;
+var MAX_SHAPE_NODES = 256;
+var MAX_EXTRUSION_VERTICES = 5e5;
+function jsonPath(parts) {
+  let result = "$";
+  for (const part of parts) {
+    if (typeof part === "number") {
+      result += `[${part}]`;
+    } else if (typeof part === "string" && /^[A-Za-z_$][\w$]*$/.test(part)) {
+      result += `.${part}`;
+    } else {
+      result += `[${JSON.stringify(String(part))}]`;
+    }
+  }
+  return result;
+}
+function childPath(path, property) {
+  return typeof property === "number" ? `${path}[${property}]` : `${path}.${property}`;
+}
+function samePoint(left, right, tolerance) {
+  return Math.abs(left[0] - right[0]) <= tolerance && Math.abs(left[1] - right[1]) <= tolerance;
+}
+function cross2(a, b, c) {
+  return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+}
+function pointOnSegment(point, start, end, tolerance) {
+  return Math.abs(cross2(start, end, point)) <= tolerance && point[0] >= Math.min(start[0], end[0]) - tolerance && point[0] <= Math.max(start[0], end[0]) + tolerance && point[1] >= Math.min(start[1], end[1]) - tolerance && point[1] <= Math.max(start[1], end[1]) + tolerance;
+}
+function segmentsIntersect(a, b, c, d, tolerance) {
+  const abC = cross2(a, b, c);
+  const abD = cross2(a, b, d);
+  const cdA = cross2(c, d, a);
+  const cdB = cross2(c, d, b);
+  if ((abC > tolerance && abD < -tolerance || abC < -tolerance && abD > tolerance) && (cdA > tolerance && cdB < -tolerance || cdA < -tolerance && cdB > tolerance)) {
+    return true;
+  }
+  return Math.abs(abC) <= tolerance && pointOnSegment(c, a, b, tolerance) || Math.abs(abD) <= tolerance && pointOnSegment(d, a, b, tolerance) || Math.abs(cdA) <= tolerance && pointOnSegment(a, c, d, tolerance) || Math.abs(cdB) <= tolerance && pointOnSegment(b, c, d, tolerance);
+}
+function validatePolygon(points, path, issues) {
+  const coordinateScale = Math.max(
+    1,
+    ...points.flatMap((point) => [Math.abs(point[0]), Math.abs(point[1])])
+  );
+  const pointTolerance = coordinateScale * 1e-10;
+  const areaTolerance = coordinateScale * coordinateScale * 1e-12;
+  if (samePoint(points[0], points.at(-1), pointTolerance)) {
+    issues.push({
+      severity: "error",
+      code: "polygon_repeated_closing_point",
+      path,
+      message: "The first polygon point is repeated as the last point.",
+      suggestion: "Remove the final point; extrusion polygons are closed automatically."
+    });
+  }
+  for (let index = 0; index < points.length; index += 1) {
+    const next = (index + 1) % points.length;
+    if (samePoint(points[index], points[next], pointTolerance)) {
+      issues.push({
+        severity: "error",
+        code: "polygon_zero_length_edge",
+        path: childPath(path, next),
+        message: `Polygon points ${index} and ${next} create a zero-length edge.`,
+        suggestion: "Remove one of the duplicate adjacent points."
+      });
+      break;
+    }
+  }
+  let twiceArea = 0;
+  for (let index = 0; index < points.length; index += 1) {
+    const current = points[index];
+    const next = points[(index + 1) % points.length];
+    twiceArea += current[0] * next[1] - next[0] * current[1];
+  }
+  if (Math.abs(twiceArea) <= areaTolerance) {
+    issues.push({
+      severity: "error",
+      code: "polygon_zero_area",
+      path,
+      message: "The extrusion polygon has zero or near-zero area.",
+      suggestion: "Use at least three non-collinear boundary points."
+    });
+  }
+  let foundIntersection = false;
+  for (let left = 0; left < points.length && !foundIntersection; left += 1) {
+    const leftNext = (left + 1) % points.length;
+    for (let right = left + 1; right < points.length; right += 1) {
+      const rightNext = (right + 1) % points.length;
+      if (left === right || leftNext === right || rightNext === left) continue;
+      if (segmentsIntersect(
+        points[left],
+        points[leftNext],
+        points[right],
+        points[rightNext],
+        areaTolerance
+      )) {
+        issues.push({
+          severity: "error",
+          code: "polygon_self_intersection",
+          path,
+          message: `Polygon edges ${left}\u2013${leftNext} and ${right}\u2013${rightNext} intersect.`,
+          suggestion: "Reorder or move the boundary points so the polygon does not cross itself."
+        });
+        foundIntersection = true;
+        break;
+      }
+    }
+  }
+}
+function meshPoint(vertices, index) {
+  const offset = index * 3;
+  return [vertices[offset], vertices[offset + 1], vertices[offset + 2]];
+}
+function triangleDoubleArea(a, b, c) {
+  const ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+  const ac = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+  return Math.hypot(
+    ab[1] * ac[2] - ab[2] * ac[1],
+    ab[2] * ac[0] - ab[0] * ac[2],
+    ab[0] * ac[1] - ab[1] * ac[0]
+  );
+}
+function validateMesh(shape, path, issues) {
+  if (shape.vertices.length % 3 !== 0) {
+    issues.push({
+      severity: "error",
+      code: "mesh_incomplete_vertex",
+      path: childPath(path, "vertices"),
+      message: "The vertices array length must be divisible by 3 (x, y, z).",
+      suggestion: "Add or remove values so every vertex has exactly three coordinates."
+    });
+  }
+  if (shape.triangles.length % 3 !== 0) {
+    issues.push({
+      severity: "error",
+      code: "mesh_incomplete_triangle",
+      path: childPath(path, "triangles"),
+      message: "The triangles array length must be divisible by 3.",
+      suggestion: "Provide exactly three vertex indices per triangle."
+    });
+  }
+  if (issues.some((issue) => issue.path.startsWith(path) && issue.severity === "error")) {
+    return;
+  }
+  const vertexCount = shape.vertices.length / 3;
+  const invalidIndex = shape.triangles.findIndex((index) => index >= vertexCount);
+  if (invalidIndex !== -1) {
+    issues.push({
+      severity: "error",
+      code: "mesh_index_out_of_bounds",
+      path: childPath(childPath(path, "triangles"), invalidIndex),
+      message: `Vertex index ${shape.triangles[invalidIndex]} is outside the 0\u2013${vertexCount - 1} range.`,
+      suggestion: "Use only indices that refer to entries in the vertices array."
+    });
+    return;
+  }
+  const float32 = new Float32Array(shape.vertices);
+  const weldedByPosition = /* @__PURE__ */ new Map();
+  const weldedIndices = [];
+  for (let vertex = 0; vertex < vertexCount; vertex += 1) {
+    const offset = vertex * 3;
+    const key = `${float32[offset]},${float32[offset + 1]},${float32[offset + 2]}`;
+    let welded = weldedByPosition.get(key);
+    if (welded === void 0) {
+      welded = weldedByPosition.size;
+      weldedByPosition.set(key, welded);
+    }
+    weldedIndices.push(welded);
+  }
+  const coordinates = Array.from(float32);
+  const boundsMin = [Infinity, Infinity, Infinity];
+  const boundsMax = [-Infinity, -Infinity, -Infinity];
+  for (let vertex = 0; vertex < vertexCount; vertex += 1) {
+    const point = meshPoint(coordinates, vertex);
+    for (const axis of [0, 1, 2]) {
+      boundsMin[axis] = Math.min(boundsMin[axis], point[axis]);
+      boundsMax[axis] = Math.max(boundsMax[axis], point[axis]);
+    }
+  }
+  const diagonal = Math.hypot(
+    boundsMax[0] - boundsMin[0],
+    boundsMax[1] - boundsMin[1],
+    boundsMax[2] - boundsMin[2]
+  );
+  const areaTolerance = Math.max(1, diagonal * diagonal) * 1e-12;
+  const faces = [];
+  const edges = /* @__PURE__ */ new Map();
+  let degenerateFaces = 0;
+  for (let offset = 0; offset < shape.triangles.length; offset += 3) {
+    const indices = shape.triangles.slice(offset, offset + 3);
+    const welded = indices.map((index) => weldedIndices[index]);
+    const faceIndex = faces.length;
+    faces.push({ indices, welded });
+    if (new Set(welded).size !== 3 || triangleDoubleArea(
+      meshPoint(coordinates, indices[0]),
+      meshPoint(coordinates, indices[1]),
+      meshPoint(coordinates, indices[2])
+    ) <= areaTolerance) {
+      degenerateFaces += 1;
+      continue;
+    }
+    for (let corner = 0; corner < 3; corner += 1) {
+      const from = welded[corner];
+      const to = welded[(corner + 1) % 3];
+      const low = Math.min(from, to);
+      const high = Math.max(from, to);
+      const key = `${low}:${high}`;
+      const edge = edges.get(key) ?? {
+        faces: [],
+        direction: 0,
+        vertices: [low, high]
+      };
+      edge.faces.push(faceIndex);
+      edge.direction += from === low ? 1 : -1;
+      edges.set(key, edge);
+    }
+  }
+  if (degenerateFaces > 0) {
+    issues.push({
+      severity: "error",
+      code: "mesh_degenerate_triangles",
+      path: childPath(path, "triangles"),
+      message: `${degenerateFaces} triangle${degenerateFaces === 1 ? " is" : "s are"} collapsed or has zero area.`,
+      suggestion: "Remove collapsed faces and ensure every triangle uses three non-collinear vertices."
+    });
+  }
+  let boundaryEdges = 0;
+  let overusedEdges = 0;
+  let misorientedEdges = 0;
+  for (const edge of edges.values()) {
+    if (edge.faces.length === 1) boundaryEdges += 1;
+    else if (edge.faces.length !== 2) overusedEdges += 1;
+    else if (edge.direction !== 0) misorientedEdges += 1;
+  }
+  if (boundaryEdges > 0) {
+    issues.push({
+      severity: "error",
+      code: "mesh_open_boundary",
+      path: childPath(path, "triangles"),
+      message: `${boundaryEdges} mesh edge${boundaryEdges === 1 ? " has" : "s have"} only one adjacent triangle, so the mesh is open.`,
+      suggestion: "Cap every hole; a solid mesh requires exactly two triangles around every edge."
+    });
+  }
+  if (overusedEdges > 0) {
+    issues.push({
+      severity: "error",
+      code: "mesh_non_manifold_edges",
+      path: childPath(path, "triangles"),
+      message: `${overusedEdges} mesh edge${overusedEdges === 1 ? " is" : "s are"} shared by more than two triangles.`,
+      suggestion: "Split or remove overlapping faces so exactly two triangles share each edge."
+    });
+  }
+  if (misorientedEdges > 0) {
+    issues.push({
+      severity: "error",
+      code: "mesh_inconsistent_winding",
+      path: childPath(path, "triangles"),
+      message: `${misorientedEdges} shared edge${misorientedEdges === 1 ? " has" : "s have"} triangles wound in the same direction.`,
+      suggestion: "Reverse the index order of inconsistent triangles so all faces point outward."
+    });
+  }
+  if (boundaryEdges === 0 && overusedEdges === 0 && degenerateFaces === 0 && faces.length > 0) {
+    const facesByVertex = /* @__PURE__ */ new Map();
+    for (let faceIndex = 0; faceIndex < faces.length; faceIndex += 1) {
+      for (const vertex of faces[faceIndex].welded) {
+        const entries = facesByVertex.get(vertex) ?? /* @__PURE__ */ new Set();
+        entries.add(faceIndex);
+        facesByVertex.set(vertex, entries);
+      }
+    }
+    const adjacencyByVertex = /* @__PURE__ */ new Map();
+    for (const edge of edges.values()) {
+      if (edge.faces.length !== 2) continue;
+      const [left, right] = edge.faces;
+      for (const vertex of edge.vertices) {
+        const adjacency = adjacencyByVertex.get(vertex) ?? /* @__PURE__ */ new Map();
+        const leftNeighbors = adjacency.get(left) ?? /* @__PURE__ */ new Set();
+        const rightNeighbors = adjacency.get(right) ?? /* @__PURE__ */ new Set();
+        leftNeighbors.add(right);
+        rightNeighbors.add(left);
+        adjacency.set(left, leftNeighbors);
+        adjacency.set(right, rightNeighbors);
+        adjacencyByVertex.set(vertex, adjacency);
+      }
+    }
+    let disconnectedFans = 0;
+    for (const [vertex, incident] of facesByVertex) {
+      if (incident.size < 2) continue;
+      const adjacency = adjacencyByVertex.get(vertex) ?? /* @__PURE__ */ new Map();
+      const first = incident.values().next().value;
+      if (first === void 0) continue;
+      const reached = /* @__PURE__ */ new Set([first]);
+      const queue = [first];
+      while (queue.length > 0) {
+        const face = queue.pop();
+        for (const neighbor of adjacency.get(face) ?? []) {
+          if (reached.has(neighbor)) continue;
+          reached.add(neighbor);
+          queue.push(neighbor);
+        }
+      }
+      if (reached.size !== incident.size) disconnectedFans += 1;
+    }
+    if (disconnectedFans > 0) {
+      issues.push({
+        severity: "error",
+        code: "mesh_non_manifold_vertices",
+        path: childPath(path, "vertices"),
+        message: `${disconnectedFans} welded ${disconnectedFans === 1 ? "vertex joins" : "vertices join"} disconnected surface fans.`,
+        suggestion: "Do not join otherwise separate closed shells at only a point."
+      });
+    }
+  }
+}
+function semanticIssues(shape) {
+  const issues = [];
+  let nodeCount = 0;
+  const visit = (node, path, depth) => {
+    nodeCount += 1;
+    if (depth > MAX_SHAPE_DEPTH) {
+      issues.push({
+        severity: "error",
+        code: "shape_too_deep",
+        path,
+        message: `The shape tree exceeds the maximum depth of ${MAX_SHAPE_DEPTH}.`,
+        suggestion: "Flatten nested boolean groups where possible."
+      });
+      return;
+    }
+    if (nodeCount > MAX_SHAPE_NODES) {
+      if (!issues.some((issue) => issue.code === "shape_too_many_nodes")) {
+        issues.push({
+          severity: "error",
+          code: "shape_too_many_nodes",
+          path,
+          message: `The shape tree exceeds the maximum of ${MAX_SHAPE_NODES} nodes.`,
+          suggestion: "Simplify repeated detail or split it across separate models."
+        });
+      }
+      return;
+    }
+    if (node.kind === "extrude") {
+      validatePolygon(node.points, childPath(path, "points"), issues);
+      const divisions = Math.max(0, Math.ceil(Math.abs(node.twist ?? 0) / 15) - 1);
+      const estimatedVertices = node.points.length * (divisions + 2);
+      if (estimatedVertices > MAX_EXTRUSION_VERTICES) {
+        issues.push({
+          severity: "error",
+          code: "extrusion_too_complex",
+          path,
+          message: `This twisted extrusion would create roughly ${estimatedVertices.toLocaleString()} profile vertices.`,
+          suggestion: "Reduce the point count or twist angle, or build the detail with simpler solids."
+        });
+      }
+      if (node.scaleTop?.some((entry) => entry < 0)) {
+        issues.push({
+          severity: "warning",
+          code: "extrusion_negative_top_scale",
+          path: childPath(path, "scaleTop"),
+          message: "A negative top scale can invert the profile through itself.",
+          suggestion: "Prefer non-negative top scale values unless the inversion is intentional."
+        });
+      }
+    } else if (node.kind === "mesh") {
+      validateMesh(node, path, issues);
+    } else if (node.kind === "union" || node.kind === "difference" || node.kind === "intersection") {
+      node.children.forEach(
+        (child, index) => visit(child, childPath(childPath(path, "children"), index), depth + 1)
+      );
+    }
+  };
+  visit(shape, "$", 0);
+  return issues;
+}
+function validateShape(input) {
+  const parsed = shapeSchema.safeParse(input);
+  const issues = [];
+  if (!parsed.success) {
+    for (const issue of parsed.error.issues) {
+      issues.push({
+        severity: "error",
+        code: `schema_${issue.code}`,
+        path: jsonPath(issue.path),
+        message: issue.message
+      });
+    }
+  } else {
+    issues.push(...semanticIssues(parsed.data));
+  }
+  const errors = issues.filter((issue) => issue.severity === "error");
+  return {
+    valid: errors.length === 0,
+    errors,
+    warnings: issues.filter((issue) => issue.severity === "warning")
+  };
+}
+var ShapeValidationError = class extends Error {
+  issues;
+  constructor(issues) {
+    const details = issues.slice(0, 8).map(
+      (issue) => `- ${issue.path}: ${issue.message}${issue.suggestion ? ` ${issue.suggestion}` : ""}`
+    ).join("\n");
+    const remaining = Math.max(0, issues.length - 8);
+    super(
+      `Shape validation failed with ${issues.length} error${issues.length === 1 ? "" : "s"}:
+${details}${remaining ? `
+- \u2026and ${remaining} more.` : ""}`
+    );
+    this.name = "ShapeValidationError";
+    this.issues = issues;
+  }
+};
+function assertValidShape(input) {
+  const result = validateShape(input);
+  if (!result.valid) throw new ShapeValidationError(result.errors);
+  return input;
+}
+
+// src/geometry.ts
 var modulePromise;
 async function getManifoldModule() {
   modulePromise ??= createManifoldModule().then((module) => {
@@ -46,17 +546,40 @@ function applyTransform(source, transform2) {
   if (transform2.translation) replace(result.translate(transform2.translation));
   return result;
 }
-function assertShapeComplexity(shape) {
-  let nodes = 0;
-  const visit = (node, depth) => {
-    nodes += 1;
-    if (depth > 24) throw new Error("Shape tree exceeds the maximum depth of 24");
-    if (nodes > 256) throw new Error("Shape tree exceeds the maximum of 256 nodes");
-    if (node.kind === "union" || node.kind === "difference" || node.kind === "intersection") {
-      node.children.forEach((child) => visit(child, depth + 1));
-    }
-  };
-  visit(shape, 0);
+var kernelStatusHelp = {
+  NonFiniteVertex: "One or more calculated vertices are NaN or infinite. Check dimensions, transforms, and mesh coordinates.",
+  NotManifold: "The result is not a closed 2-manifold solid. Mesh edges must have exactly two oppositely wound faces; extrusion outlines must not repeat or cross; boolean operands should have clean closed volumes.",
+  VertexOutOfBounds: "A triangle references a vertex outside the mesh vertex array.",
+  PropertiesWrongLength: "The mesh vertex-property array does not contain complete XYZ triples.",
+  MissingPositionProperties: "The mesh is missing XYZ position properties.",
+  MergeVectorsDifferentLengths: "The mesh repair metadata is inconsistent.",
+  MergeIndexOutOfBounds: "The mesh repair metadata references a missing vertex.",
+  TransformWrongLength: "A transform does not contain the required number of values.",
+  RunIndexWrongLength: "The imported mesh contains invalid run metadata.",
+  FaceIDWrongLength: "The imported mesh contains invalid face metadata.",
+  InvalidConstruction: "The requested solid is geometrically invalid. Check for collapsed dimensions, coincident surfaces, and self-intersections.",
+  ResultTooLarge: "The result exceeds the CAD kernel's size limit. Reduce segments, polygon points, twist, or boolean complexity.",
+  InvalidTangents: "The imported mesh contains invalid tangent data.",
+  Cancelled: "The CAD kernel operation was cancelled."
+};
+function kernelStatusError(status) {
+  const help = kernelStatusHelp[status] ?? "Simplify the shape and validate each child solid independently.";
+  return new Error(
+    `CAD kernel rejected the shape (${status}). ${help} Use validate_shape before saving to get structured preflight diagnostics.`
+  );
+}
+function friendlyKernelError(error) {
+  if (error instanceof Error && error.message.startsWith("CAD kernel rejected")) {
+    return error;
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  if (/not[ _-]?manifold/i.test(message)) {
+    return kernelStatusError("NotManifold");
+  }
+  return new Error(
+    `CAD kernel could not build the shape: ${message}. Use validate_shape before saving to get structured preflight diagnostics.`,
+    { cause: error }
+  );
 }
 async function buildNode(shape, module) {
   const { Manifold, Mesh } = module;
@@ -141,13 +664,18 @@ async function buildNode(shape, module) {
   return applyTransform(result, shape.transform);
 }
 async function buildSolid(shape) {
-  assertShapeComplexity(shape);
+  const validated = assertValidShape(shape);
   const module = await getManifoldModule();
-  const solid = await buildNode(shape, module);
+  let solid;
+  try {
+    solid = await buildNode(validated, module);
+  } catch (error) {
+    throw friendlyKernelError(error);
+  }
   const status = solid.status();
   if (status !== "NoError") {
     solid.delete();
-    throw new Error(`CAD kernel rejected the shape (status ${String(status)})`);
+    throw kernelStatusError(String(status));
   }
   return solid;
 }
@@ -329,6 +857,104 @@ function importModel(format, data, encoding) {
   return binary ? parseBinaryStl(bytes) : parseAsciiStl(new TextDecoder().decode(bytes));
 }
 
+// src/model-patches.ts
+var blockedTokens = /* @__PURE__ */ new Set(["__proto__", "prototype", "constructor"]);
+function decodePointer(path) {
+  if (!path.startsWith("/") || path === "/") {
+    throw new Error(
+      "Patch path must point inside the editable model, such as /shape/size/0."
+    );
+  }
+  return path.slice(1).split("/").map((token) => {
+    if (/~(?:[^01]|$)/.test(token)) {
+      throw new Error(`Patch path contains an invalid JSON Pointer escape: ${path}`);
+    }
+    const decoded = token.replaceAll("~1", "/").replaceAll("~0", "~");
+    if (blockedTokens.has(decoded)) {
+      throw new Error(`Patch path contains a forbidden property: ${decoded}`);
+    }
+    return decoded;
+  });
+}
+function arrayIndex(token, length, allowEnd) {
+  if (!/^(0|[1-9]\d*)$/.test(token)) {
+    throw new Error(`Expected an array index but received ${JSON.stringify(token)}.`);
+  }
+  const index = Number(token);
+  if (index > length || !allowEnd && index === length) {
+    throw new Error(`Array index ${index} is outside the current array.`);
+  }
+  return index;
+}
+function isContainer(value2) {
+  return value2 !== null && typeof value2 === "object";
+}
+function parentAt(document, tokens) {
+  let current = document;
+  for (const token of tokens.slice(0, -1)) {
+    if (!isContainer(current)) {
+      throw new Error(`Patch path enters a non-container value at ${JSON.stringify(token)}.`);
+    }
+    if (Array.isArray(current)) {
+      const index = arrayIndex(token, current.length, false);
+      current = current[index];
+    } else {
+      if (!Object.hasOwn(current, token)) {
+        throw new Error(`Patch path property does not exist: ${token}`);
+      }
+      current = current[token];
+    }
+  }
+  if (!isContainer(current)) {
+    throw new Error("Patch path parent is not an object or array.");
+  }
+  return { parent: current, token: tokens.at(-1) };
+}
+function applyPatch(document, patch) {
+  const tokens = decodePointer(patch.path);
+  if (!(/* @__PURE__ */ new Set(["name", "color", "shape"])).has(tokens[0])) {
+    throw new Error("Only /name, /color, and /shape may be patched.");
+  }
+  const { parent, token } = parentAt(document, tokens);
+  if (Array.isArray(parent)) {
+    if (patch.op === "add") {
+      if (token === "-") {
+        parent.push(structuredClone(patch.value));
+      } else {
+        parent.splice(arrayIndex(token, parent.length, true), 0, structuredClone(patch.value));
+      }
+    } else {
+      const index = arrayIndex(token, parent.length, false);
+      if (patch.op === "remove") parent.splice(index, 1);
+      else parent[index] = structuredClone(patch.value);
+    }
+    return;
+  }
+  if (patch.op !== "add" && !Object.hasOwn(parent, token)) {
+    throw new Error(`Patch path property does not exist: ${token}`);
+  }
+  if (patch.op === "remove") delete parent[token];
+  else parent[token] = structuredClone(patch.value);
+}
+function applyModelPatches(model, patches) {
+  const document = structuredClone({
+    name: model.name,
+    color: model.color,
+    shape: model.shape
+  });
+  patches.forEach((patch, index) => {
+    try {
+      applyPatch(document, patch);
+    } catch (error) {
+      throw new Error(
+        `Patch ${index} (${patch.op} ${patch.path}) failed: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error }
+      );
+    }
+  });
+  return document;
+}
+
 // src/presets.ts
 var value = (input, fallback, min = 0.1, max = 1e4) => Math.min(max, Math.max(min, input ?? fallback));
 function generatePreset(template, parameters = {}) {
@@ -455,80 +1081,24 @@ function generatePreset(template, parameters = {}) {
   }
 }
 
-// src/schema.ts
-import { z } from "zod";
-var finiteNumber = z.number().finite();
-var positive = finiteNumber.positive().max(1e5);
-var vec2 = z.tuple([finiteNumber, finiteNumber]);
-var vec3 = z.tuple([finiteNumber, finiteNumber, finiteNumber]);
-var transform = z.object({
-  translation: vec3.optional(),
-  rotation: vec3.optional(),
-  scale: z.tuple([
-    finiteNumber.refine((value2) => value2 !== 0, "Scale cannot be zero"),
-    finiteNumber.refine((value2) => value2 !== 0, "Scale cannot be zero"),
-    finiteNumber.refine((value2) => value2 !== 0, "Scale cannot be zero")
-  ]).optional()
-}).strict();
-var base = { transform: transform.optional() };
-var shapeSchema = z.lazy(
-  () => z.discriminatedUnion("kind", [
-    z.object({
-      ...base,
-      kind: z.literal("box"),
-      size: z.tuple([positive, positive, positive]),
-      center: z.boolean().optional()
-    }),
-    z.object({
-      ...base,
-      kind: z.literal("sphere"),
-      radius: positive,
-      segments: z.number().int().min(8).max(256).optional()
-    }),
-    z.object({
-      ...base,
-      kind: z.literal("cylinder"),
-      height: positive,
-      radius: positive,
-      segments: z.number().int().min(3).max(256).optional(),
-      center: z.boolean().optional()
-    }),
-    z.object({
-      ...base,
-      kind: z.literal("cone"),
-      height: positive,
-      radiusBottom: positive,
-      radiusTop: finiteNumber.min(0).max(1e5),
-      segments: z.number().int().min(3).max(256).optional(),
-      center: z.boolean().optional()
-    }),
-    z.object({
-      ...base,
-      kind: z.literal("extrude"),
-      points: z.array(vec2).min(3).max(2048),
-      height: positive,
-      twist: finiteNumber.min(-1e4).max(1e4).optional(),
-      scaleTop: vec2.optional(),
-      center: z.boolean().optional()
-    }),
-    z.object({
-      ...base,
-      kind: z.literal("mesh"),
-      vertices: z.array(finiteNumber).min(9).max(9e5),
-      triangles: z.array(z.number().int().nonnegative()).min(3).max(9e5)
-    }),
-    z.object({
-      ...base,
-      kind: z.enum(["union", "difference", "intersection"]),
-      children: z.array(shapeSchema).min(2).max(64)
-    })
-  ])
-);
-var colorSchema = z.string().regex(/^#[0-9a-fA-F]{6}$/, "Use a six-digit hex color such as #4f8cff");
-var modelNameSchema = z.string().trim().min(1).max(120);
-
 // src/server.ts
 var STUDIO_RESOURCE_URI = "ui://cad-studio/studio.html";
+var modelIdSchema = z2.string().uuid().describe("Saved model ID from list_models, load_model, or a prior tool result");
+var expectedRevisionSchema = z2.number().int().positive().describe("Current revision from load_model; rejects stale edits instead of overwriting them");
+var patchPathSchema = z2.string().startsWith("/").min(2).describe(
+  "JSON Pointer into /shape, /name, or /color; for example /shape/size/0 or /shape/children/1/radius"
+);
+var modelPatchSchema = z2.discriminatedUnion("op", [
+  z2.object({
+    op: z2.enum(["add", "replace"]),
+    path: patchPathSchema,
+    value: z2.unknown().describe("New JSON value at path")
+  }).strict(),
+  z2.object({
+    op: z2.literal("remove"),
+    path: patchPathSchema
+  }).strict()
+]);
 async function loadWidgetHtml() {
   const adjacent = new URL("./widget.html", import.meta.url);
   try {
@@ -590,7 +1160,7 @@ async function createCadStudioServer(options) {
   const server = new McpServer(
     { name: "mcp-cad-studio", version: "0.1.0" },
     {
-      instructions: "Use CAD tools to create, inspect, edit, combine, import, and export parametric 3D models. Call studio_ui when the user wants the interactive CAD canvas. Every data tool works without the UI."
+      instructions: "Use CAD tools to create, inspect, edit, combine, import, export, and delete parametric 3D models. Before changing an existing model, call list_models and load_model, then preserve that modelId: call update_model for direct edits, or generate_model with modelId to regenerate a template in place. Do not create a replacement unless the user asks for a separate model. Prefer update_model.patches for small parameter edits. Call validate_shape before saving complex extrusions or raw meshes. Call studio_ui when the user wants the interactive CAD canvas. Every data tool works without the UI."
     }
   );
   registerAppResource(
@@ -686,8 +1256,8 @@ async function createCadStudioServer(options) {
     "load_model",
     {
       title: "Load CAD model",
-      description: "Load a saved CAD model, its editable parametric definition, and render mesh.",
-      inputSchema: { modelId: z2.string().uuid() },
+      description: "Load a saved CAD model, including the modelId, current revision, complete editable parametric definition, and render mesh. Call this before update_model or delete_model.",
+      inputSchema: { modelId: modelIdSchema },
       annotations: {
         readOnlyHint: true,
         destructiveHint: false,
@@ -708,7 +1278,7 @@ async function createCadStudioServer(options) {
     "create_model",
     {
       title: "Create CAD model",
-      description: "Create a CAD model from a declarative parametric shape tree. Supports primitives, extrusions, transforms, mesh input, and boolean operations.",
+      description: "Create a separate new CAD model from a declarative parametric shape tree. Do not use this to modify an existing model; load it and call update_model instead. Supports primitives, extrusions, transforms, mesh input, and boolean operations.",
       inputSchema: {
         name: modelNameSchema,
         color: colorSchema.default("#6ee7b7"),
@@ -726,7 +1296,7 @@ async function createCadStudioServer(options) {
       return {
         structuredContent: await modelPayload(model, store, mesh),
         content: content(
-          `Created ${model.name} with ${mesh.triangleCount} triangles (model ${model.id}).`
+          `Created ${model.name} with ${mesh.triangleCount} triangles (model ${model.id}, revision ${model.revision}). For later changes, update this modelId in place with update_model; do not create a replacement.`
         )
       };
     }
@@ -735,11 +1305,13 @@ async function createCadStudioServer(options) {
     "generate_model",
     {
       title: "Generate CAD model",
-      description: "Generate a useful parametric CAD model from a built-in template: bracket, pipe, gear, enclosure, or bolt.",
+      description: "Generate a built-in parametric template: bracket, pipe, gear, enclosure, or bolt. To revise a previously generated model, pass its modelId and expectedRevision to regenerate it in place. Omit modelId only when the user wants a separate new model.",
       inputSchema: {
-        name: modelNameSchema,
+        modelId: modelIdSchema.describe("Existing model to regenerate in place; omit only to create a new model").optional(),
+        expectedRevision: expectedRevisionSchema.optional(),
+        name: modelNameSchema.describe("Name for a new model, or optional replacement name when regenerating").optional(),
         template: z2.enum(["bracket", "pipe", "gear", "enclosure", "bolt"]),
-        color: colorSchema.default("#60a5fa"),
+        color: colorSchema.describe("Color for a new model, or optional replacement color when regenerating").optional(),
         parameters: z2.object({
           width: z2.number().positive().optional(),
           depth: z2.number().positive().optional(),
@@ -756,14 +1328,32 @@ async function createCadStudioServer(options) {
         openWorldHint: false
       }
     },
-    async ({ name, template, color, parameters }) => {
+    async ({ modelId, expectedRevision, name, template, color, parameters }) => {
       const shape = generatePreset(template, parameters);
       const mesh = await renderShape(shape);
-      const model = await store.create({ name, color, shape });
+      if (modelId) {
+        const current = store.get(modelId);
+        const model2 = await store.update(modelId, {
+          name: name ?? current.name,
+          color: color ?? current.color,
+          shape,
+          expectedRevision
+        });
+        return {
+          structuredContent: await modelPayload(model2, store, mesh),
+          content: content(
+            `Regenerated ${model2.name} as a ${template} in place; modelId remains ${model2.id}, revision is now ${model2.revision}.`
+          )
+        };
+      }
+      if (!name) {
+        throw new Error("name is required when generate_model creates a new model.");
+      }
+      const model = await store.create({ name, color: color ?? "#60a5fa", shape });
       return {
         structuredContent: await modelPayload(model, store, mesh),
         content: content(
-          `Generated ${template} model ${model.name} with volume ${mesh.volume.toFixed(2)} mm\xB3.`
+          `Generated ${template} model ${model.name} (${model.id}, revision ${model.revision}) with volume ${mesh.volume.toFixed(2)} mm\xB3. Revise it in place with update_model.`
         )
       };
     }
@@ -772,13 +1362,16 @@ async function createCadStudioServer(options) {
     "update_model",
     {
       title: "Update CAD model",
-      description: "Edit a CAD model by replacing its name, color, or parametric shape definition. Pass expectedRevision to prevent overwriting concurrent edits.",
+      description: "Modify an existing saved model in place while preserving its modelId. Use patches for small edits (example: replace /shape/size/0), or shape to replace the complete definition. Load the model first and pass its expectedRevision. Never call create_model merely to revise an existing model.",
       inputSchema: {
-        modelId: z2.string().uuid(),
-        name: modelNameSchema.optional(),
-        color: colorSchema.optional(),
-        shape: shapeSchema.optional(),
-        expectedRevision: z2.number().int().positive().optional()
+        modelId: modelIdSchema,
+        name: modelNameSchema.describe("Optional replacement name").optional(),
+        color: colorSchema.describe("Optional replacement six-digit hex color").optional(),
+        shape: shapeSchema.describe("Optional complete replacement shape; cannot be combined with patches").optional(),
+        patches: z2.array(modelPatchSchema).min(1).max(64).describe(
+          "Targeted edits applied in order to the current model. Use add for a new field/array item, replace for an existing value, and remove for an optional field."
+        ).optional(),
+        expectedRevision: expectedRevisionSchema.optional()
       },
       annotations: {
         readOnlyHint: false,
@@ -786,20 +1379,85 @@ async function createCadStudioServer(options) {
         openWorldHint: false
       }
     },
-    async ({ modelId, name, color, shape, expectedRevision }) => {
+    async ({ modelId, name, color, shape, patches, expectedRevision }) => {
       const current = store.get(modelId);
-      const nextShape = shape ?? current.shape;
+      if (name === void 0 && color === void 0 && shape === void 0 && patches === void 0) {
+        throw new Error(
+          "update_model needs at least one change: name, color, shape, or patches."
+        );
+      }
+      if (shape !== void 0 && patches !== void 0) {
+        throw new Error(
+          "Pass either a complete replacement shape or targeted patches, not both."
+        );
+      }
+      const patched = patches ? applyModelPatches(current, patches) : { name: current.name, color: current.color, shape: current.shape };
+      const nextName = modelNameSchema.parse(name ?? patched.name);
+      const nextColor = colorSchema.parse(color ?? patched.color);
+      const nextShape = shapeSchema.parse(shape ?? patched.shape);
       const mesh = await renderShape(nextShape);
       const model = await store.update(modelId, {
-        name,
-        color,
-        shape,
+        name: nextName,
+        color: nextColor,
+        shape: nextShape,
         expectedRevision
       });
       return {
         structuredContent: await modelPayload(model, store, mesh),
-        content: content(`Updated ${model.name} to revision ${model.revision}.`)
+        content: content(
+          `Updated ${model.name} in place; modelId remains ${model.id}, revision is now ${model.revision}.`
+        )
       };
+    }
+  );
+  server.registerTool(
+    "validate_shape",
+    {
+      title: "Validate CAD shape",
+      description: "Preflight a complete parametric shape without saving it. Reports static polygon/mesh topology errors and warnings, then asks the CAD kernel to verify the solid. Use this before create_model or update_model for complex shapes.",
+      inputSchema: { shape: shapeSchema },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        openWorldHint: false
+      }
+    },
+    async ({ shape }) => {
+      const validation = validateShape(shape);
+      if (!validation.valid) {
+        return {
+          structuredContent: { ...validation },
+          content: content(
+            `Shape is invalid:
+${validation.errors.map((issue) => `- ${issue.path}: ${issue.message}${issue.suggestion ? ` ${issue.suggestion}` : ""}`).join("\n")}`
+          )
+        };
+      }
+      try {
+        const mesh = await renderShape(shape);
+        return {
+          structuredContent: { ...validation, mesh },
+          content: content(
+            `Shape is valid: closed manifold solid with ${mesh.triangleCount} triangles and volume ${mesh.volume.toFixed(2)} mm\xB3.${validation.warnings.length ? ` ${validation.warnings.length} warning(s) are included in structuredContent.` : ""}`
+          )
+        };
+      } catch (error) {
+        const issue = {
+          severity: "error",
+          code: "kernel_rejection",
+          path: "$",
+          message: error instanceof Error ? error.message : String(error),
+          suggestion: "Validate boolean children separately, then simplify coincident or self-intersecting geometry."
+        };
+        return {
+          structuredContent: {
+            valid: false,
+            errors: [issue],
+            warnings: validation.warnings
+          },
+          content: content(`Shape is invalid: ${issue.message}`)
+        };
+      }
     }
   );
   server.registerTool(
@@ -808,7 +1466,7 @@ async function createCadStudioServer(options) {
       title: "Transform CAD model",
       description: "Apply an incremental translation, Euler rotation in degrees, or scale to a CAD model.",
       inputSchema: {
-        modelId: z2.string().uuid(),
+        modelId: modelIdSchema,
         translation: z2.tuple([z2.number(), z2.number(), z2.number()]).optional(),
         rotation: z2.tuple([z2.number(), z2.number(), z2.number()]).optional(),
         scale: z2.tuple([
@@ -816,7 +1474,7 @@ async function createCadStudioServer(options) {
           z2.number().refine((entry) => entry !== 0),
           z2.number().refine((entry) => entry !== 0)
         ]).optional(),
-        expectedRevision: z2.number().int().positive().optional()
+        expectedRevision: expectedRevisionSchema.optional()
       },
       annotations: {
         readOnlyHint: false,
@@ -899,24 +1557,31 @@ async function createCadStudioServer(options) {
     "delete_model",
     {
       title: "Delete CAD model",
-      description: "Permanently delete a saved CAD model from this studio.",
-      inputSchema: { modelId: z2.string().uuid() },
+      description: "Permanently delete one saved CAD model. Call list_models or load_model first to identify the exact modelId, and pass expectedRevision when available to avoid deleting a newer edit.",
+      inputSchema: {
+        modelId: modelIdSchema,
+        expectedRevision: expectedRevisionSchema.optional()
+      },
       annotations: {
         readOnlyHint: false,
         destructiveHint: true,
         openWorldHint: false
       }
     },
-    async ({ modelId }) => {
-      const deleted = await store.delete(modelId);
+    async ({ modelId, expectedRevision }) => {
+      const deleted = await store.delete(modelId, expectedRevision);
+      const nextSummary = store.list()[0];
+      const next = nextSummary ? store.get(nextSummary.id) : null;
       return {
-        structuredContent: {
+        structuredContent: next ? { ...await modelPayload(next, store), deletedModel: summary(deleted) } : {
           models: store.list(),
           deletedModel: summary(deleted),
           activeModel: null,
           mesh: null
         },
-        content: content(`Deleted ${deleted.name}.`)
+        content: content(
+          `Deleted ${deleted.name} (${deleted.id}).${next ? ` Selected remaining model ${next.name}.` : " The studio is now empty."}`
+        )
       };
     }
   );
@@ -1202,8 +1867,13 @@ var CadStore = class {
       shape: source.shape
     });
   }
-  async delete(id) {
+  async delete(id, expectedRevision) {
     const model = this.get(id);
+    if (expectedRevision !== void 0 && expectedRevision !== model.revision) {
+      throw new Error(
+        `Revision conflict: expected ${expectedRevision}, current revision is ${model.revision}`
+      );
+    }
     this.models.delete(id);
     await this.persist();
     return model;

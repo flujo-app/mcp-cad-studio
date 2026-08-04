@@ -107,7 +107,7 @@ declare class CadStore {
     create(input: CreateModelInput): Promise<CadModel>;
     update(id: string, input: UpdateModelInput): Promise<CadModel>;
     duplicate(id: string, name?: string): Promise<CadModel>;
-    delete(id: string): Promise<CadModel>;
+    delete(id: string, expectedRevision?: number): Promise<CadModel>;
     private persist;
 }
 
@@ -151,4 +151,24 @@ declare function renderShape(shape: ShapeNode): Promise<RenderMesh>;
 declare function exportObj(shape: ShapeNode, name: string): Promise<string>;
 declare function exportStl(shape: ShapeNode, name: string): Promise<string>;
 
-export { type CadModel, CadStore, type GenerateTemplate, type ModelSummary, type RenderMesh, STUDIO_RESOURCE_URI, type ShapeNode, type StudioSnapshot, type Transform, type Vec2, type Vec3, createCadStudioServer, exportObj, exportStl, generatePreset, importModel, renderShape, startNetworkServer };
+type ShapeIssueSeverity = "error" | "warning";
+interface ShapeIssue {
+    severity: ShapeIssueSeverity;
+    code: string;
+    path: string;
+    message: string;
+    suggestion?: string;
+}
+interface ShapeValidationResult {
+    valid: boolean;
+    errors: ShapeIssue[];
+    warnings: ShapeIssue[];
+}
+declare function validateShape(input: unknown): ShapeValidationResult;
+declare class ShapeValidationError extends Error {
+    readonly issues: ShapeIssue[];
+    constructor(issues: ShapeIssue[]);
+}
+declare function assertValidShape(input: unknown): ShapeNode;
+
+export { type CadModel, CadStore, type GenerateTemplate, type ModelSummary, type RenderMesh, STUDIO_RESOURCE_URI, type ShapeIssue, type ShapeIssueSeverity, type ShapeNode, ShapeValidationError, type ShapeValidationResult, type StudioSnapshot, type Transform, type Vec2, type Vec3, assertValidShape, createCadStudioServer, exportObj, exportStl, generatePreset, importModel, renderShape, startNetworkServer, validateShape };

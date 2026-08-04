@@ -33,5 +33,12 @@ describe("CadStore", () => {
     const restored = new CadStore(dataFile);
     await restored.ready();
     expect(restored.get(model.id).name).toBe("Fixture 2");
+
+    await expect(restored.delete(model.id, 1)).rejects.toThrow("Revision conflict");
+    await restored.delete(model.id, 2);
+    expect(restored.list()).toEqual([]);
+    const afterDelete = new CadStore(dataFile);
+    await afterDelete.ready();
+    expect(afterDelete.list()).toEqual([]);
   });
 });

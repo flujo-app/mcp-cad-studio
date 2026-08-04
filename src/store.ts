@@ -115,8 +115,16 @@ export class CadStore {
     });
   }
 
-  async delete(id: string): Promise<CadModel> {
+  async delete(id: string, expectedRevision?: number): Promise<CadModel> {
     const model = this.get(id);
+    if (
+      expectedRevision !== undefined &&
+      expectedRevision !== model.revision
+    ) {
+      throw new Error(
+        `Revision conflict: expected ${expectedRevision}, current revision is ${model.revision}`,
+      );
+    }
     this.models.delete(id);
     await this.persist();
     return model;

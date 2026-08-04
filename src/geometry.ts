@@ -3,6 +3,7 @@ import createManifoldModule, {
   type ManifoldToplevel,
 } from "manifold-3d";
 import type { RenderMesh, ShapeNode, Transform, Vec3 } from "./types.js";
+import { assertValidShape } from "./validation.js";
 
 let modulePromise: Promise<ManifoldToplevel> | undefined;
 
@@ -32,21 +33,55 @@ function applyTransform(
   return result;
 }
 
-function assertShapeComplexity(shape: ShapeNode): void {
-  let nodes = 0;
-  const visit = (node: ShapeNode, depth: number) => {
-    nodes += 1;
-    if (depth > 24) throw new Error("Shape tree exceeds the maximum depth of 24");
-    if (nodes > 256) throw new Error("Shape tree exceeds the maximum of 256 nodes");
-    if (
-      node.kind === "union" ||
-      node.kind === "difference" ||
-      node.kind === "intersection"
-    ) {
-      node.children.forEach((child) => visit(child, depth + 1));
-    }
-  };
-  visit(shape, 0);
+const kernelStatusHelp: Record<string, string> = {
+  NonFiniteVertex:
+    "One or more calculated vertices are NaN or infinite. Check dimensions, transforms, and mesh coordinates.",
+  NotManifold:
+    "The result is not a closed 2-manifold solid. Mesh edges must have exactly two oppositely wound faces; extrusion outlines must not repeat or cross; boolean operands should have clean closed volumes.",
+  VertexOutOfBounds:
+    "A triangle references a vertex outside the mesh vertex array.",
+  PropertiesWrongLength:
+    "The mesh vertex-property array does not contain complete XYZ triples.",
+  MissingPositionProperties:
+    "The mesh is missing XYZ position properties.",
+  MergeVectorsDifferentLengths:
+    "The mesh repair metadata is inconsistent.",
+  MergeIndexOutOfBounds:
+    "The mesh repair metadata references a missing vertex.",
+  TransformWrongLength:
+    "A transform does not contain the required number of values.",
+  RunIndexWrongLength: "The imported mesh contains invalid run metadata.",
+  FaceIDWrongLength: "The imported mesh contains invalid face metadata.",
+  InvalidConstruction:
+    "The requested solid is geometrically invalid. Check for collapsed dimensions, coincident surfaces, and self-intersections.",
+  ResultTooLarge:
+    "The result exceeds the CAD kernel's size limit. Reduce segments, polygon points, twist, or boolean complexity.",
+  InvalidTangents: "The imported mesh contains invalid tangent data.",
+  Cancelled: "The CAD kernel operation was cancelled.",
+};
+
+function kernelStatusError(status: string): Error {
+  const help = kernelStatusHelp[status] ??
+    "Simplify the shape and validate each child solid independently.";
+  return new Error(
+    `CAD kernel rejected the shape (${status}). ${help} ` +
+      "Use validate_shape before saving to get structured preflight diagnostics.",
+  );
+}
+
+function friendlyKernelError(error: unknown): Error {
+  if (error instanceof Error && error.message.startsWith("CAD kernel rejected")) {
+    return error;
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  if (/not[ _-]?manifold/i.test(message)) {
+    return kernelStatusError("NotManifold");
+  }
+  return new Error(
+    `CAD kernel could not build the shape: ${message}. ` +
+      "Use validate_shape before saving to get structured preflight diagnostics.",
+    { cause: error },
+  );
 }
 
 async function buildNode(
@@ -143,13 +178,18 @@ async function buildNode(
 }
 
 export async function buildSolid(shape: ShapeNode): Promise<ManifoldInstance> {
-  assertShapeComplexity(shape);
+  const validated = assertValidShape(shape);
   const module = await getManifoldModule();
-  const solid = await buildNode(shape, module);
+  let solid: ManifoldInstance;
+  try {
+    solid = await buildNode(validated, module);
+  } catch (error) {
+    throw friendlyKernelError(error);
+  }
   const status = solid.status();
   if (status !== "NoError") {
     solid.delete();
-    throw new Error(`CAD kernel rejected the shape (status ${String(status)})`);
+    throw kernelStatusError(String(status));
   }
   return solid;
 }

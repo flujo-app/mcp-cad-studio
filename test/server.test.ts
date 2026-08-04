@@ -35,6 +35,7 @@ describe("MCP server", () => {
         "create_model",
         "generate_model",
         "update_model",
+        "validate_shape",
         "transform_model",
         "boolean_models",
         "duplicate_model",
@@ -89,5 +90,104 @@ describe("MCP server", () => {
     expect(exportPayload.filename).toBe("tool-cube.obj");
     expect(exportPayload.data).toContain("\nv ");
     expect(exportPayload.data).toContain("\nf ");
+  });
+
+  it("patches and regenerates the same model instead of creating copies", async () => {
+    const created = await client.callTool({
+      name: "create_model",
+      arguments: {
+        name: "Editable",
+        shape: { kind: "box", size: [10, 10, 10], center: true },
+      },
+    });
+    const first = (created.structuredContent as {
+      activeModel: { id: string; revision: number };
+    }).activeModel;
+    const patched = await client.callTool({
+      name: "update_model",
+      arguments: {
+        modelId: first.id,
+        expectedRevision: first.revision,
+        patches: [{ op: "replace", path: "/shape/size/0", value: 20 }],
+      },
+    });
+    const patchPayload = patched.structuredContent as {
+      models: unknown[];
+      activeModel: { id: string; revision: number; shape: { size: number[] } };
+      mesh: { volume: number };
+    };
+    expect(patchPayload.models).toHaveLength(1);
+    expect(patchPayload.activeModel).toMatchObject({
+      id: first.id,
+      revision: 2,
+      shape: { size: [20, 10, 10] },
+    });
+    expect(patchPayload.mesh.volume).toBeCloseTo(2000, 5);
+
+    const regenerated = await client.callTool({
+      name: "generate_model",
+      arguments: {
+        modelId: first.id,
+        expectedRevision: 2,
+        template: "gear",
+        parameters: { teeth: 12 },
+      },
+    });
+    const regeneratedPayload = regenerated.structuredContent as {
+      models: unknown[];
+      activeModel: { id: string; revision: number };
+    };
+    expect(regeneratedPayload.models).toHaveLength(1);
+    expect(regeneratedPayload.activeModel).toMatchObject({ id: first.id, revision: 3 });
+  });
+
+  it("validates draft shapes and deletes with revision protection", async () => {
+    const validation = await client.callTool({
+      name: "validate_shape",
+      arguments: {
+        shape: {
+          kind: "extrude",
+          points: [
+            [0, 0],
+            [10, 10],
+            [0, 10],
+            [10, 0],
+          ],
+          height: 5,
+        },
+      },
+    });
+    expect(validation.structuredContent).toMatchObject({
+      valid: false,
+      errors: expect.arrayContaining([
+        expect.objectContaining({ code: "polygon_self_intersection" }),
+      ]),
+    });
+
+    const created = await client.callTool({
+      name: "create_model",
+      arguments: {
+        name: "Disposable",
+        shape: { kind: "sphere", radius: 5 },
+      },
+    });
+    const model = (created.structuredContent as {
+      activeModel: { id: string; revision: number };
+    }).activeModel;
+    const stale = await client.callTool({
+      name: "delete_model",
+      arguments: { modelId: model.id, expectedRevision: model.revision + 1 },
+    });
+    expect(stale.isError).toBe(true);
+
+    const deleted = await client.callTool({
+      name: "delete_model",
+      arguments: { modelId: model.id, expectedRevision: model.revision },
+    });
+    expect(deleted.structuredContent).toMatchObject({
+      models: [],
+      activeModel: null,
+      deletedModel: { id: model.id },
+    });
   });
 });
