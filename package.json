@@ -31,20 +31,20 @@
     "prepack": "npm run check"
   },
   "dependencies": {
+    "@types/node": "^24.10.0",
+    "@types/three": "^0.185.0",
     "@modelcontextprotocol/ext-apps": "^1.7.5",
     "@modelcontextprotocol/sdk": "^1.30.0",
+    "esbuild": "^0.28.1",
     "manifold-3d": "^3.5.1",
     "selfsigned": "^5.5.0",
     "three": "^0.185.1",
+    "tsup": "^8.5.1",
+    "typescript": "^5.9.3",
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@types/node": "^24.10.0",
-    "@types/three": "^0.185.0",
-    "esbuild": "^0.28.1",
     "tsx": "^4.20.6",
-    "tsup": "^8.5.1",
-    "typescript": "^5.9.3",
     "vitest": "^4.1.10"
   },
   "overrides": {
