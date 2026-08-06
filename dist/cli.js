@@ -3,7 +3,6 @@
 // src/cli.ts
 import { homedir } from "os";
 import { join as join2, resolve } from "path";
-import { fileURLToPath } from "url";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 
 // src/http.ts
@@ -14,8 +13,10 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { generate } from "selfsigned";
 
 // src/server.ts
+import { realpathSync } from "fs";
 import { readFile } from "fs/promises";
-import { join } from "path";
+import { dirname, join } from "path";
+import { fileURLToPath, pathToFileURL } from "url";
 import {
   registerAppResource,
   registerAppTool,
@@ -1099,13 +1100,39 @@ var modelPatchSchema = z2.discriminatedUnion("op", [
     path: patchPathSchema
   }).strict()
 ]);
-async function loadWidgetHtml() {
-  const adjacent = new URL("./widget.html", import.meta.url);
+function widgetHtmlCandidates() {
+  const candidates = [new URL("./widget.html", import.meta.url)];
+  const addSiblingOf = (pathLike) => {
+    try {
+      candidates.push(pathToFileURL(join(dirname(realpathSync(pathLike)), "widget.html")));
+    } catch {
+    }
+  };
   try {
-    return await readFile(adjacent, "utf8");
+    addSiblingOf(fileURLToPath(import.meta.url));
   } catch {
-    return readFile(join(process.cwd(), "dist", "widget.html"), "utf8");
   }
+  if (process.argv[1]) {
+    addSiblingOf(process.argv[1]);
+  }
+  candidates.push(pathToFileURL(join(process.cwd(), "dist", "widget.html")));
+  return candidates;
+}
+async function loadWidgetHtml() {
+  const candidates = widgetHtmlCandidates();
+  const attempted = [];
+  for (const candidate of candidates) {
+    const asPath = fileURLToPath(candidate);
+    if (attempted.includes(asPath)) continue;
+    attempted.push(asPath);
+    try {
+      return await readFile(candidate, "utf8");
+    } catch {
+    }
+  }
+  throw new Error(
+    `Unable to locate widget.html. Looked in: ${attempted.join(", ")}. Run \`npm run build\` if you are working from a source checkout.`
+  );
 }
 function content(text) {
   return [{ type: "text", text }];
@@ -1785,7 +1812,7 @@ async function startNetworkServer(options) {
 // src/store.ts
 import { randomUUID } from "crypto";
 import { mkdir, readFile as readFile3, rename, writeFile } from "fs/promises";
-import { dirname } from "path";
+import { dirname as dirname2 } from "path";
 var CadStore = class {
   dataFile;
   models = /* @__PURE__ */ new Map();
@@ -1888,7 +1915,7 @@ var CadStore = class {
 `;
     const dataFile = this.dataFile;
     this.writeChain = this.writeChain.then(async () => {
-      await mkdir(dirname(dataFile), { recursive: true });
+      await mkdir(dirname2(dataFile), { recursive: true });
       const temporary = `${dataFile}.${process.pid}.tmp`;
       await writeFile(temporary, payload, "utf8");
       await rename(temporary, dataFile);
@@ -2025,15 +2052,11 @@ async function main(args = process.argv.slice(2)) {
   process.once("SIGINT", shutdown);
   process.once("SIGTERM", shutdown);
 }
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  main().catch((error) => {
-    process.stderr.write(
-      `[cad-studio] ${error instanceof Error ? error.message : String(error)}
-`
-    );
-    process.exitCode = 1;
-  });
-}
+main().catch((error) => {
+  process.stderr.write(`[cad-studio] ${error instanceof Error ? error.message : String(error)}
+`);
+  process.exitCode = 1;
+});
 export {
   main,
   parseCli

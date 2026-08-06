@@ -20,7 +20,24 @@ jobs:
       - run: npm ci
       - run: npm run check
       - run: npm pack --dry-run
-      - name: Verify production-only install can build
+
+      # npm and npx expose bins as SYMLINKS in node_modules/.bin on Linux and macOS,
+      # while Windows gets a .cmd shim that passes the real path. An entry-point guard
+      # comparing process.argv[1] to import.meta.url therefore skipped main() only on
+      # POSIX systems, and clients reported "MCP error -32000: Connection closed".
+      # Starting the CLI through a symlink here keeps that regression from returning.
+      - name: Verify the CLI answers initialize through a symlinked bin
+        run: |
+          mkdir -p /tmp/posix-bin
+          ln -sf "$PWD/dist/cli.js" /tmp/posix-bin/mcp-cad-studio
+          request='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci","version":"1.0.0"}}}'
+          response="$(printf '%s\n' "$request" | timeout 60 node /tmp/posix-bin/mcp-cad-studio --stdio | head -n 1)"
+          echo "$response"
+          echo "$response" | grep -q '"serverInfo"'
+
+      # Build tooling belongs in devDependencies, so a production install must be able
+      # to RUN the published dist rather than rebuild it.
+      - name: Verify a production-only install can run the server
         run: |
           npm ci --omit=dev
-          npm run build
+          node dist/cli.js --help

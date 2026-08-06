@@ -1,6 +1,5 @@
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { startNetworkServer } from "./http.js";
 import { createCadStudioServer } from "./server.js";
@@ -148,11 +147,15 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   process.once("SIGTERM", shutdown);
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  main().catch((error) => {
-    process.stderr.write(
-      `[cad-studio] ${error instanceof Error ? error.message : String(error)}\n`,
-    );
-    process.exitCode = 1;
-  });
-}
+// dist/cli.js is only ever used as the package's `bin` entry - it is never
+// imported as a library (that is dist/index.js), so main() runs unconditionally.
+//
+// Do NOT reintroduce an `import.meta.url === process.argv[1]` guard here: npm and
+// npx install bins as SYMLINKS in node_modules/.bin on Linux and macOS, so
+// argv[1] is the symlink while import.meta.url is the real file. Such a guard
+// silently skips main(), the process exits 0 without writing to stdout, and MCP
+// clients report "MCP error -32000: Connection closed".
+main().catch((error) => {
+  process.stderr.write(`[cad-studio] ${error instanceof Error ? error.message : String(error)}\n`);
+  process.exitCode = 1;
+});

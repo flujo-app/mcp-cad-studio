@@ -1,6 +1,7 @@
+import { realpathSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   registerAppResource,
   registerAppTool,
@@ -65,13 +66,53 @@ export interface CadStudioServerOptions {
   widgetHtml?: string;
 }
 
-async function loadWidgetHtml(): Promise<string> {
-  const adjacent = new URL("./widget.html", import.meta.url);
+function widgetHtmlCandidates(): URL[] {
+  const candidates: URL[] = [new URL("./widget.html", import.meta.url)];
+
+  // Under `--preserve-symlinks-main`, or when the bundle is loaded through a
+  // symlinked path, import.meta.url points at the symlink's directory rather
+  // than the directory the asset was published into. Follow the symlinks for
+  // both this module and the process entry point before giving up.
+  const addSiblingOf = (pathLike: string) => {
+    try {
+      candidates.push(pathToFileURL(join(dirname(realpathSync(pathLike)), "widget.html")));
+    } catch {
+      // Unresolvable path - just try the next candidate.
+    }
+  };
+
   try {
-    return await readFile(adjacent, "utf8");
+    addSiblingOf(fileURLToPath(import.meta.url));
   } catch {
-    return readFile(join(process.cwd(), "dist", "widget.html"), "utf8");
+    // Not a file: URL (bundled into a single-file executable, for example).
   }
+  if (process.argv[1]) {
+    addSiblingOf(process.argv[1]);
+  }
+  candidates.push(pathToFileURL(join(process.cwd(), "dist", "widget.html")));
+
+  return candidates;
+}
+
+async function loadWidgetHtml(): Promise<string> {
+  const candidates = widgetHtmlCandidates();
+  const attempted: string[] = [];
+
+  for (const candidate of candidates) {
+    const asPath = fileURLToPath(candidate);
+    if (attempted.includes(asPath)) continue;
+    attempted.push(asPath);
+    try {
+      return await readFile(candidate, "utf8");
+    } catch {
+      // Try the next candidate location.
+    }
+  }
+
+  throw new Error(
+    `Unable to locate widget.html. Looked in: ${attempted.join(", ")}. ` +
+      "Run `npm run build` if you are working from a source checkout.",
+  );
 }
 
 function content(text: string) {
