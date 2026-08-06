@@ -1158,7 +1158,7 @@ async function createCadStudioServer(options) {
   const widgetHtml = options.widgetHtml ?? await loadWidgetHtml();
   const { store } = options;
   const server = new McpServer(
-    { name: "mcp-cad-studio", version: "0.2.0" },
+    { name: "mcp-cad-studio", version: "0.2.1" },
     {
       instructions: "Use CAD tools to create, inspect, edit, combine, import, export, and delete parametric 3D models. Before changing an existing model, call list_models and load_model, then preserve that modelId: call update_model for direct edits, or generate_model with modelId to regenerate a template in place. Do not create a replacement unless the user asks for a separate model. Prefer update_model.patches for small parameter edits. Call validate_shape before saving complex extrusions or raw meshes. Call studio_ui when the user wants the interactive CAD canvas. Every data tool works without the UI."
     }

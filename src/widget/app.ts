@@ -269,7 +269,7 @@ function resultPayload(result: unknown): StudioPayload | undefined {
 }
 
 const app = new App(
-  { name: "mcp-cad-studio-view", version: "0.2.0" },
+  { name: "mcp-cad-studio-view", version: "0.2.1" },
   { availableDisplayModes: ["inline", "pip", "fullscreen"] },
   { autoResize: false },
 );
