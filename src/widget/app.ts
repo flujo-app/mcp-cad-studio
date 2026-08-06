@@ -268,10 +268,15 @@ function resultPayload(result: unknown): StudioPayload | undefined {
   return (result as { structuredContent?: StudioPayload }).structuredContent;
 }
 
+// Auto-resize must stay ON. connect() only installs the size-changed reporter
+// when `autoResize` is set, and hosts embed inline apps in a small placeholder
+// frame (FLUJO: 200px) that they enlarge solely in response to
+// `ui/notifications/size-changed`. With it disabled the widget never reported a
+// size and rendered as a ~200px sliver in every host.
 const app = new App(
   { name: "mcp-cad-studio-view", version: "0.2.1" },
   { availableDisplayModes: ["inline", "pip", "fullscreen"] },
-  { autoResize: false },
+  { autoResize: true },
 );
 
 app.ontoolresult = (params) => {

@@ -22,7 +22,15 @@
       }
 
       * { box-sizing: border-box; }
-      html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: var(--bg); color: var(--text); }
+      /*
+        The document must be sized by its CONTENT, not by the frame it is in.
+        MCP App hosts embed the widget in a short iframe (FLUJO starts at 200px)
+        and only enlarge it when the app reports a size. The ext-apps SDK measures
+        that size from the document element, so pinning html/body to `height: 100%`
+        would make the widget report the host's placeholder height back to the host
+        and stay tiny forever. `min-height` still fills a host that is already tall.
+      */
+      html, body { width: 100%; min-height: 100%; margin: 0; overflow: hidden; background: var(--bg); color: var(--text); }
       button, input, select, textarea { font: inherit; }
       button { color: inherit; }
 
