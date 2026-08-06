@@ -4,3 +4,5 @@ coverage/
 *.tgz
 *.log
 .DS_Store
+# Pinned mcp-publisher binary downloaded by scripts/publish-mcp.mjs
+.tools/

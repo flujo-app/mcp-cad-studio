@@ -1,0 +1,37 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.mario-andreschak/mcp-cad-studio",
+  "title": "MCP CAD Studio",
+  "description": "A self-contained parametric CAD studio MCP server with an interactive MCP App.",
+  "version": "0.2.0",
+  "repository": {
+    "url": "https://github.com/flujo-app/mcp-cad-studio",
+    "source": "github"
+  },
+  "icons": [
+    {
+      "src": "https://raw.githubusercontent.com/flujo-app/mcp-cad-studio/main/assets/icon.png",
+      "mimeType": "image/png",
+      "sizes": ["512x512"]
+    }
+  ],
+  "packages": [
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "mcp-cad-studio",
+      "version": "0.2.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "named",
+          "name": "--stdio",
+          "description": "Run the MCP server over standard input and output.",
+          "isRequired": true
+        }
+      ]
+    }
+  ]
+}

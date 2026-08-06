@@ -1,6 +1,7 @@
 {
   "name": "mcp-cad-studio",
   "version": "0.2.0",
+  "mcpName": "io.github.mario-andreschak/mcp-cad-studio",
   "description": "A self-contained parametric CAD studio MCP server with an interactive MCP App.",
   "type": "module",
   "license": "MIT",
@@ -11,6 +12,7 @@
   },
   "files": [
     "dist",
+    "server.json",
     "README.md",
     "LICENSE"
   ],
@@ -27,9 +29,15 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
-    "check": "npm run typecheck && npm test && npm run build",
+    "sync-version": "node scripts/sync-version.mjs",
+    "version:check": "node scripts/sync-version.mjs --check",
+    "version": "node scripts/sync-version.mjs && npm run build && git add src dist server.json",
+    "check": "npm run version:check && npm run typecheck && npm test && npm run build",
     "release": "node scripts/release-npm.mjs",
     "release:check": "node scripts/release-npm.mjs --check",
+    "release:verify-tag": "node scripts/verify-release-tag.mjs",
+    "mcp:publish": "node scripts/publish-mcp.mjs",
+    "mcp:validate": "node scripts/publish-mcp.mjs --dry-run",
     "prepack": "npm run check"
   },
   "dependencies": {

@@ -1,0 +1,39 @@
+name: Publish
+
+# Publishing mcp-cad-studio to npm happens here, not on a laptop: pushing a
+# v* tag is the single trigger, and the tag must match package.json before any
+# bytes are uploaded. `npm run release` remains the manual fallback.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  npm:
+    runs-on: ubuntu-latest
+    env:
+      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://registry.npmjs.org
+      - run: npm ci
+      - name: Verify the tag matches package.json
+        run: node scripts/verify-release-tag.mjs "${{ github.ref_name }}"
+      - run: npm audit --omit=dev --audit-level=high
+      - run: npm run check
+      # prepack re-runs `npm run check`, so the published tarball is built from
+      # the same sources that just passed verification.
+      - name: Publish to npm
+        if: ${{ env.NODE_AUTH_TOKEN != '' }}
+        run: npm publish --provenance --access public
+      - name: Explain skipped registry publish
+        if: ${{ env.NODE_AUTH_TOKEN == '' }}
+        run: echo "NPM_TOKEN is not configured; the verified build remains available but nothing was published."
