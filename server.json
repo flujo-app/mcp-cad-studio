@@ -3,7 +3,7 @@
   "name": "io.github.mario-andreschak/mcp-cad-studio",
   "title": "MCP CAD Studio",
   "description": "A self-contained parametric CAD studio MCP server with an interactive MCP App.",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "repository": {
     "url": "https://github.com/flujo-app/mcp-cad-studio",
     "source": "github"
@@ -22,7 +22,7 @@
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "mcp-cad-studio",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "transport": {
         "type": "stdio"
       },

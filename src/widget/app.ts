@@ -274,7 +274,7 @@ function resultPayload(result: unknown): StudioPayload | undefined {
 // `ui/notifications/size-changed`. With it disabled the widget never reported a
 // size and rendered as a ~200px sliver in every host.
 const app = new App(
-  { name: "mcp-cad-studio-view", version: "0.2.1" },
+  { name: "mcp-cad-studio-view", version: "0.2.2" },
   { availableDisplayModes: ["inline", "pip", "fullscreen"] },
   { autoResize: true },
 );
